@@ -3,6 +3,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,7 +40,14 @@ func decodeJSON(r *http.Request, v any) error {
 	if r.Body == nil {
 		return ErrBadJSON
 	}
-	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrBadJSON, err)
+	}
+	if err := rejectDuplicateObjectFields(body); err != nil {
+		return fmt.Errorf("%w: %v", ErrBadJSON, err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		return fmt.Errorf("%w: %v", ErrBadJSON, err)
@@ -49,6 +57,39 @@ func decodeJSON(r *http.Request, v any) error {
 		return ErrBadJSON
 	}
 	return nil
+}
+
+func rejectDuplicateObjectFields(body []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok || delim != '{' {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		key, ok := tok.(string)
+		if !ok {
+			return ErrBadJSON
+		}
+		if _, exists := seen[key]; exists {
+			return fmt.Errorf("字段重复: %q", key)
+		}
+		seen[key] = struct{}{}
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return err
+		}
+	}
+	_, err = dec.Token()
+	return err
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
